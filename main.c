@@ -12,7 +12,7 @@
 
 int16_t instrumentation[360 * 9];
 uint16_t instrumentation_index;
-uint16_t instrumentation_countdown;
+uint16_t instrumentation_countdown = 1;
 
 static void instrumentation_start(uint16_t start) {
   instrumentation_index = 0;
@@ -50,13 +50,14 @@ static void instrumentation_get() {
 }
 
 #define CTL_STATE_IDLE 0
-#define CTL_STATE_CW 1
-#define CTL_STATE_CCW 2
+#define CTL_STATE_STOP 1
+#define CTL_STATE_CW 2
+#define CTL_STATE_CCW 3
 
 int16_t control_integral;
 
 uint8_t control_state;
-uint8_t target_speed;
+int8_t target_speed;
 int16_t target_position;
 
 void ign_handler(uint16_t type, void *data, uint16_t len) {
@@ -70,7 +71,7 @@ void ign_handler(uint16_t type, void *data, uint16_t len) {
       instrumentation_countdown--;
     }
     
-    target_position = 10 + (position * 58) / 10;
+    target_position = 10 + (position * 53) / 10;
     target_speed = (speed * 8) / 10;
     
     control_integral = 0;
@@ -84,19 +85,14 @@ void ign_handler(uint16_t type, void *data, uint16_t len) {
       target_speed = max_speed;
     }
     
-    if(target_position > current_position) {
-      IGN->set_led_constant(IGN_PLED_G, 0);
-      IGN->set_led_constant(IGN_PLED_R, 250);
+    if(target_position > current_position + 10) {
       control_state = CTL_STATE_CW;
       IGN->motor_cw();
-    } else if(target_position < current_position) {
-      IGN->set_led_constant(IGN_PLED_G, 250);
-      IGN->set_led_constant(IGN_PLED_R, 0);
+    } else if(target_position < current_position - 10) {
       control_state = CTL_STATE_CCW;
       IGN->motor_ccw();
+      target_speed = -target_speed;
     } else {
-      IGN->set_led_constant(IGN_PLED_G, 0);
-      IGN->set_led_constant(IGN_PLED_R, 0);
       control_state = CTL_STATE_IDLE;
       IGN->motor_stop();
     }
@@ -117,6 +113,13 @@ int main(void) {
   CORCONbits.PSV = 1;
   PSVPAG = 0;
   
+  if(IGN->version != IGN_VERSION) {
+    IGN->set_led_pulsing(IGN_PLED_R, 0);
+    IGN->set_led_pulsing(IGN_PLED_G, 0);
+    
+    while(1) IGN->idle();
+  }
+  
   IGN->set_handler(ign_handler);
   
   while(1) {
@@ -126,50 +129,60 @@ int main(void) {
       static int16_t filtered_speed;
       static int16_t last_position;
       int16_t current_position = IGN->get_encoder_count();
-      int16_t measured_speed = abs(current_position - last_position) * 10;
+      int16_t measured_speed = (current_position - last_position) * 10;
       
       filtered_speed = (filtered_speed * 4 + measured_speed) / 5;
+      
+      if(target_speed > 20 || target_speed < -20) {
+        if(control_state == CTL_STATE_CW && current_position + filtered_speed * 3 > target_position) {
+          target_speed -= 4;
+        } else if(control_state == CTL_STATE_CCW && current_position + filtered_speed * 3 < target_position) {
+          target_speed += 4;
+        }
+      }
+      
       int16_t error = target_speed - filtered_speed;
       
-      if(control_state == CTL_STATE_CW && current_position + filtered_speed > target_position) {
-        IGN->set_led_constant(IGN_PLED_G, 0);
-        IGN->set_led_constant(IGN_PLED_R, 0);
-        control_state = CTL_STATE_IDLE;
+      if(control_state == CTL_STATE_CW && current_position + (filtered_speed * 3) / 4 > target_position) {
+        control_state = CTL_STATE_STOP;
         IGN->motor_brake();
-      } else if(control_state == CTL_STATE_CCW && current_position - filtered_speed < target_position) {
-        IGN->set_led_constant(IGN_PLED_G, 0);
-        IGN->set_led_constant(IGN_PLED_R, 0);
-        control_state = CTL_STATE_IDLE;
+        target_speed = 0;
+      } else if(control_state == CTL_STATE_CCW && current_position + (filtered_speed * 3) / 4 < target_position) {
+        control_state = CTL_STATE_STOP;
         IGN->motor_brake();
-      } else if(control_state != CTL_STATE_IDLE) {
-        uint16_t control_p = (error * 6) / 10;
+        target_speed = 0;
+      } else if(control_state == CTL_STATE_CW || control_state == CTL_STATE_CCW) {
+        control_integral += (error * 4) / 10;
         
-        control_integral += (error * 6) / 10;
-        
-        if(control_integral > 1000) {
-          control_integral = 1000;
+        if(control_integral > 1023) {
+          control_integral = 1023;
         }
         
-        if(control_integral < -1000) {
-          control_integral = -1000;
+        if(control_integral < -1023) {
+          control_integral = -1023;
         }
         
-        int16_t motor_speed = control_p + control_integral / 10;
+        int16_t motor_speed = control_integral;
         
-        if(motor_speed < 0) {
-          motor_speed = 0;
+        if(motor_speed < -1023) {
+          motor_speed = -1023;
         }
         
-        if(motor_speed > 99) {
-          motor_speed = 99;
+        if(motor_speed > 1023) {
+          motor_speed = 1023;
         }
         
-        instrumentation_put(current_position);
-        instrumentation_put(error);
-        instrumentation_put(control_integral);
-        
-        IGN->motor_set_speed((motor_speed * 256) / 25);
+        IGN->motor_set_speed(abs(motor_speed));
+      } else if(control_state == CTL_STATE_STOP) {
+        if(measured_speed < 10) {
+          control_state = CTL_STATE_IDLE;
+          IGN->motor_stop();
+        }
       }
+      
+      instrumentation_put(measured_speed);
+      instrumentation_put(current_position);
+      instrumentation_put(target_position);
       
       last_position = current_position;
       last_ctl_tick = current_tick;
