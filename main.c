@@ -39,7 +39,7 @@ static void instrumentation_get() {
     
     IGN->send_packet(packet_buffer, sizeof(packet_buffer));
     
-    uint16_t delay = 5000;
+    uint16_t delay = 2000;
     
     while(delay--) IGN->idle();
   }
@@ -48,6 +48,19 @@ static void instrumentation_get() {
   
   IGN->send_packet(packet_buffer, 1);
 }
+
+uint8_t speed_lookup[] = {
+  1, 1, 1, 1, 1, 2, 3, 3, 4, 5,
+  6, 6, 7, 8, 8, 9, 10, 10, 11, 12,
+  13, 13, 14, 15, 15, 16, 17, 18, 19, 20,
+  21, 21, 22, 23, 23, 24, 25, 25, 26, 27,
+  28, 28, 29, 30, 30, 31, 32, 32, 33, 34,
+  35, 35, 36, 37, 37, 38, 39, 39, 40, 41,
+  42, 42, 43, 44, 44, 45, 46, 46, 47, 48,
+  49, 49, 50, 51, 51, 52, 53, 53, 54, 55,
+  56, 56, 57, 58, 58, 59, 60, 60, 61, 62,
+  62, 63, 64, 65, 65, 66, 67, 67, 68, 69,
+};
 
 #define CTL_STATE_IDLE 0
 #define CTL_STATE_STOP 1
@@ -72,19 +85,12 @@ void ign_handler(uint16_t type, void *data, uint16_t len) {
     }
     
     target_position = 10 + (position * 53) / 10;
-    target_speed = (speed * 8) / 10;
+    target_speed = speed_lookup[speed];
     
     control_integral = 0;
     
     int16_t current_position = IGN->get_encoder_count();
-    
-    int16_t distance = abs(target_position - current_position);
-    int16_t max_speed = distance / 5;
-    
-    if(target_speed > max_speed) {
-      target_speed = max_speed;
-    }
-    
+
     if(target_position > current_position + 10) {
       control_state = CTL_STATE_CW;
       IGN->motor_cw();
@@ -131,7 +137,14 @@ int main(void) {
       int16_t current_position = IGN->get_encoder_count();
       int16_t measured_speed = (current_position - last_position) * 10;
       
-      filtered_speed = (filtered_speed * 4 + measured_speed) / 5;
+      // round away from zero
+      if(measured_speed > 0) {
+        measured_speed += 2;
+      } else if(measured_speed < 0) {
+        measured_speed -= 2;
+      }
+      
+      filtered_speed = (filtered_speed * 3 + measured_speed) / 4;
       
       if(target_speed > 20 || target_speed < -20) {
         if(control_state == CTL_STATE_CW && current_position + filtered_speed * 3 > target_position) {
@@ -152,27 +165,25 @@ int main(void) {
         IGN->motor_brake();
         target_speed = 0;
       } else if(control_state == CTL_STATE_CW || control_state == CTL_STATE_CCW) {
-        control_integral += (error * 4) / 10;
+        control_integral += error * 6;
         
-        if(control_integral > 1023) {
-          control_integral = 1023;
+        if(control_integral > 10230) {
+          control_integral = 10230;
         }
         
-        if(control_integral < -1023) {
-          control_integral = -1023;
+        if(control_integral < -10230) {
+          control_integral = -10230;
         }
         
-        int16_t motor_speed = control_integral;
+        int16_t motor_speed = control_integral / 10;
         
-        if(motor_speed < -1023) {
-          motor_speed = -1023;
+        if(control_state == CTL_STATE_CW && motor_speed > 0) {
+          IGN->motor_set_speed(motor_speed);
+        } else if(control_state == CTL_STATE_CCW && motor_speed < 0) {
+          IGN->motor_set_speed(-motor_speed);
+        } else {
+          IGN->motor_set_speed(0);
         }
-        
-        if(motor_speed > 1023) {
-          motor_speed = 1023;
-        }
-        
-        IGN->motor_set_speed(abs(motor_speed));
       } else if(control_state == CTL_STATE_STOP) {
         if(measured_speed < 10) {
           control_state = CTL_STATE_IDLE;
@@ -180,9 +191,9 @@ int main(void) {
         }
       }
       
-      instrumentation_put(measured_speed);
+      instrumentation_put(filtered_speed);
       instrumentation_put(current_position);
-      instrumentation_put(target_position);
+      instrumentation_put(control_integral / 10);
       
       last_position = current_position;
       last_ctl_tick = current_tick;
